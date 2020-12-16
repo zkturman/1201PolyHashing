@@ -16,13 +16,13 @@ testrealloc_v : assoc.h Realloc/specific.h Realloc/realloc.c testrealloc.c ../..
 	$(CC) testrealloc.c Realloc/realloc.c ../../ADTs/General/general.c -o testrealloc_v -I./Realloc $(VALGRIND) $(LDLIBS)
 
 testcuckoo_s : assoc.h Cuckoo/specific.h Cuckoo/cuckoo.c testrealloc.c ../../ADTs/General/general.h ../../ADTs/General/general.c
-	$(CC) testrealloc.c Cuckoo/cuckoo.c ../../ADTs/General/general.c -o testcuckoo_s -I./Cuckoo $(SANITIZE) $(LDLIBS)
+	$(CC) testcuckoo.c Cuckoo/cuckoo.c ../../ADTs/General/general.c -o testcuckoo_s -I./Cuckoo $(SANITIZE) $(LDLIBS)
 
 testcuckoo_v : assoc.h Cuckoo/specific.h Cuckoo/cuckoo.c testrealloc.c ../../ADTs/General/general.h ../../ADTs/General/general.c
-	$(CC) testrealloc.c Cuckoo/cuckoo.c ../../ADTs/General/general.c -o testcuckoo_v -I./Cuckoo $(VALGRIND) $(LDLIBS)
+	$(CC) testcuckoo.c Cuckoo/cuckoo.c ../../ADTs/General/general.c -o testcuckoo_v -I./Cuckoo $(VALGRIND) $(LDLIBS)
 
 testcuckoo : assoc.h Cuckoo/specific.h Cuckoo/cuckoo.c testrealloc.c ../../ADTs/General/general.h ../../ADTs/General/general.c
-	$(CC) testrealloc.c Cuckoo/cuckoo.c ../../ADTs/General/general.c -o testcuckoo -I./Cuckoo $(PRODUCTION) $(LDLIBS)
+	$(CC) testcuckoo.c Cuckoo/cuckoo.c ../../ADTs/General/general.c -o testcuckoo -I./Cuckoo $(PRODUCTION) $(LDLIBS)
 
 clean:
 	rm -f testrealloc_s testrealloc_v testrealloc testcuckoo_s testcuckoo_v testcuckoo

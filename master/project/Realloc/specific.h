@@ -10,12 +10,11 @@ struct entry{
 typedef struct entry entry;
 
 struct assoc{
-   entry** table;
+   entry **table;
    int count;
    int tableSize;
-   int dataSize;
+   int keySize;
    int useStrings;
-   int hash; /*probably don't need that*/
 };
 typedef struct assoc assoc;
 

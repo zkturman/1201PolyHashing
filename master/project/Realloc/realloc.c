@@ -34,7 +34,7 @@ assoc* assoc_init(int keysize){
    a = (assoc *)ncalloc(1, sizeof(assoc));
    a->tableSize = INITSIZE;
    a->table = ncalloc(a->tableSize, sizeof(entry *));
-   a->dataSize = keysize;
+   a->keySize = keysize;
    if(keysize == STRINGTYPE){
       a->useStrings = true;
    }
@@ -141,7 +141,7 @@ bool _keysMatch(assoc *a, void *x, void *y){
       }
    }
    else{
-      if (memcmp(x, y, a->dataSize) == 0){
+      if (memcmp(x, y, a->keySize) == 0){
          return true;
       }
    }
@@ -165,12 +165,12 @@ unsigned long _zktHash(assoc *a, void *key){
       length = strlen((char *)key);
    }
    else{
-      length = a->dataSize;
+      length = a->keySize;
    }
    while(count < length){
       c = *((unsigned char *)key + count);
       position = count + 1;
-      hash = (c + (position)) * position * hash;
+      hash = (c + (position)) * position * hash + ZKTHASHINIT;
       count++;
    }
    return hash % (a->tableSize - 1) + 1;
@@ -185,7 +185,7 @@ unsigned long _djb2Hash(assoc *a, void *key){
       length = strlen((char *)key);
    }
    else{
-      length = a->dataSize;
+      length = a->keySize;
    }
    while (count < length){
       c = *((unsigned char *)key + count);
@@ -200,7 +200,7 @@ bool _rehash(assoc **a){
    if (a == NULL || *a == NULL){
       return false;
    }
-   newA = assoc_init((*a)->dataSize);
+   newA = assoc_init((*a)->keySize);
    newA->useStrings = (*a)->useStrings;
    if (_rehashTable(*a, newA) == false){
       return false;
@@ -286,13 +286,13 @@ void _test(){
    assert(test1 != NULL);
    assert(test1->tableSize == INITSIZE);
    assert(test1->count == 0);
-   assert(test1->dataSize == sizeof(int));
+   assert(test1->keySize == sizeof(int));
    assert(test1->useStrings == false);
    assert(test2 != NULL);
-   assert(test2->dataSize == sizeof(long));
+   assert(test2->keySize == sizeof(long));
    assert(test2->useStrings == false);
    assert(test3 != NULL);
-   assert(test3->dataSize == 0);
+   assert(test3->keySize == 0);
    assert(test3->useStrings == true);
 
    /*making entries*/
@@ -330,22 +330,26 @@ void _test(){
 
    /*probe hashing with _zktHash*/
    v1 = 1024;
-   placeholder = (((((long)ZKTHASHINIT * (0 + 1) * 1) * (4 + 2) * 2)
-      * (0 + 3) * 3) * (0 + 4) * 4);
+   placeholder = (((((long)ZKTHASHINIT * (0 + 1) * 1 + ZKTHASHINIT)
+      * (4 + 2) * 2 + ZKTHASHINIT) * (0 + 3) * 3 + ZKTHASHINIT)
+      * (0 + 4) * 4 + ZKTHASHINIT);
    assert(_zktHash(test1, &v1) == placeholder % (test1->tableSize - 1) + 1);
    v1 = 212;
-   placeholder = (((((long)ZKTHASHINIT * (212 + 1) * 1) * (0 + 2) * 2)
-      * (0 + 3) * 3) * (0 + 4) * 4);
+   placeholder = (((((long)ZKTHASHINIT * (212 + 1) * 1 + ZKTHASHINIT)
+      * (0 + 2) * 2 + ZKTHASHINIT) * (0 + 3) * 3 + ZKTHASHINIT)
+      * (0 + 4) * 4 + ZKTHASHINIT);
    assert(_zktHash(test1, &v1) == placeholder % (test1->tableSize - 1) + 1);
    v2 = 1024;
-   placeholder = (((((((((long)ZKTHASHINIT * (0 + 1) * 1) * (4 + 2) * 2)
-      * (0 + 3) * 3) * (0 + 4) * 4) * (0 + 5) * 5) * (0 + 6) * 6)
-      * (0 + 7) * 7) * (0 + 8) * 8);
-   assert(_zktHash(test2, &v2) == placeholder % (test2->tableSize - 1) + 1);
+   placeholder = (((((((((long)ZKTHASHINIT * (0 + 1) * 1 + ZKTHASHINIT)
+      * (4 + 2) * 2 + ZKTHASHINIT) * (0 + 3) * 3 + ZKTHASHINIT)
+      * (0 + 4) * 4 + ZKTHASHINIT) * (0 + 5) * 5 + ZKTHASHINIT)
+      * (0 + 6) * 6 + ZKTHASHINIT) * (0 + 7) * 7 + ZKTHASHINIT)
+      * (0 + 8) * 8 + ZKTHASHINIT);
+   assert(_zktHash(test2, &v2) == placeholder % (test1->tableSize - 1) + 1);
    strcpy(v3, "bob");
-   placeholder = ((((long)ZKTHASHINIT * ('b' + 1) * 1) * ('o' + 2) * 2)
-      * ('b' + 3) * 3);
-   assert(_zktHash(test3, (void *)v3) == placeholder % (test3->tableSize - 1) + 1);
+   placeholder = ((((long)ZKTHASHINIT * ('b' + 1) * 1 + ZKTHASHINIT)
+      * ('o' + 2) * 2 + ZKTHASHINIT) * ('b' + 3) * 3 + ZKTHASHINIT);
+   assert(_zktHash(test3, (void *)v3) == placeholder % (test1->tableSize - 1) + 1);
 
    /*make sure things with different addresses hash the same if same value*/
    count = 0;
