@@ -4,21 +4,32 @@
 
 #define DJB2HASHINIT 5381
 #define DJB2HASHFACT 33
-#define ZKTHASHINIT  331
+#define ZKTHASHINIT  337
+#define ZKTHASHFACT 23
 #define REHASHMARK 0.6
 #define RESIZEFACT 2
 
+table *_createTable();
+table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo);
 entry *_createEntry(void *key, void *data);
 unsigned long _zktHash(assoc *a, void *key);
 unsigned long _djb2Hash(assoc *a, void *key);
 unsigned long _findNextProbe(assoc *a, unsigned long hash, unsigned long probe);
 bool _rehash(assoc **a);
-bool _rehashTable(assoc *old, assoc *new);
-bool _shouldRehash(assoc *a);
+bool _rehashTables(assoc *old, assoc *new);
+bool _shouldRehash(table *t);
 int _nextPrime(const int n);
 bool _isPrime(const int n);
 bool _isOdd(const int n);
 bool _keysMatch(assoc *a, void *x, void *y);
+bool _doCuckoo(assoc **a, entry *e);
+bool _addEntry(table *t, int index, entry *e);
+bool _updateEntry(table *t, int index, entry *e);
+void _swapEntry(entry **a, entry **b);
+bool _rehashInsert(assoc** a, void* key, void* data);
+
+
+
 
 /*
    Initialise the Associative array
@@ -32,15 +43,21 @@ assoc* assoc_init(int keysize){
       on_error("Negative keysize? Exiting.");
    }
    a = (assoc *)ncalloc(1, sizeof(assoc));
-   a->tableSize = INITSIZE;
-   a->table = ncalloc(a->tableSize, sizeof(entry *));
-   a->cuckooSize = INITSIZE;
-   a->cuckoo = ncalloc(a->cuckooSize, sizeof(entry *));
+   a->base = _createTable();
+   a->cuckoo = _createTable();
    a->keySize = keysize;
    if(keysize == STRINGTYPE){
       a->useStrings = true;
    }
    return a;
+}
+
+table *_createTable(){
+   table *t;
+   t = ncalloc(1, sizeof(table));
+   t->size = INITSIZE;
+   t->ary = ncalloc(t->size, sizeof(entry *));
+   return t;
 }
 
 /*
@@ -49,60 +66,16 @@ assoc* assoc_init(int keysize){
    be changed due to a realloc() etc.
 */
 void assoc_insert(assoc** a, void* key, void* data){
-   entry *e, *tmp;
-   int hash, cHash, count;
+   entry *e;
+   bool found;
    e = _createEntry(key, data);
-   tmp = e;
-   do{
-      hash = _djb2Hash(*a, e->key);
-      if((*a)->table[hash] == NULL){
-         (*a)->table[hash] = e;
-         (*a)->count += 1;
-         return;
-      }
-      else{
-         if (_keysMatch(*a, (*a)->table[hash]->key, e->key) == true){
-            (*a)->table[hash]->data = e->data;
-            free(e);
-            return;
-         }
-         tmp = (*a)->table[hash];
-         (*a)->table[hash] = e;
-         e = tmp;
-         cHash = _zktHash(*a, e->key);
-         if ((*a)->cTable[cHash] == NULL){
-            (*a)->cTable[hash] = e;
-            (*a)->cCount += 1;
-            return;
-         }
-         else{
-            if(_keysMatch(*a, (*a)->cTable[cHash]->key, e->key) == true){
-               (*a)->cTable[cHash]->data = e->data;
-               free(e);
-               return;
-            }
-            tmp = (*a)->cTable[cHash];
-            (*a)->cTable[cHash] = e;
-            e = tmp;
-            count++;
-         }
-      }
-   } while (count < 4); /*count < some number*/
-   if (_shouldRehash(*a) == true){
-      _rehash(a);
+   found = _doCuckoo(a, e);
+   /*
+   _rehash(a);
+   */
+   if (found == false){
+      assoc_insert(a, e->key, e->data);
    }
-}
-
-unsigned long _findNextProbe(assoc *a, unsigned long hash, unsigned long probe){
-   unsigned long nextHash;
-   nextHash = hash;
-   if (probe > hash){
-      nextHash = a->tableSize - (probe - nextHash);
-   }
-   else{
-      nextHash = hash - probe;
-   }
-   return nextHash;
 }
 
 /*
@@ -110,7 +83,7 @@ unsigned long _findNextProbe(assoc *a, unsigned long hash, unsigned long probe){
    currently stored in the table
 */
 unsigned int assoc_count(assoc* a){
-   return a->count + a->cCount;
+   return a->base->count + a->cuckoo->count;
 }
 
 /*
@@ -118,19 +91,15 @@ unsigned int assoc_count(assoc* a){
    NULL => not found
 */
 void* assoc_lookup(assoc* a, void* key){
-   unsigned long hash, nextHash, probe;
+   unsigned long hash, cHash;
    hash = _djb2Hash(a, key);
-   nextHash = hash;
-   probe = _zktHash(a, key);
-   do{
-      if (a->table[nextHash] == NULL){
-         return NULL;
-      }
-      if (_keysMatch(a, a->table[nextHash]->key, key) == true){
-            return a->table[nextHash]->data;
-      }
-      nextHash = _findNextProbe(a, nextHash, probe);
-   } while (nextHash != hash);
+   cHash = _zktHash(a, key);
+   if (_keysMatch(a, a->base->ary[hash]->key, key) == true){
+      return a->base->ary[hash]->data;
+   }
+   if (_keysMatch(a, a->cuckoo->ary[cHash]->key, key) == true){
+      return a->base->ary[cHash]->data;
+   }
    return NULL;
 }
 
@@ -139,17 +108,19 @@ void assoc_todot(assoc* a);
 /* Free up all allocated space from 'a' */
 void assoc_free(assoc* a){
    int i = 0;
-   for (i = 0; i < a->tableSize; i++){
-      if (a->table[i] != NULL){
-         free(a->table[i]);
+   for (i = 0; i < a->base->size; i++){
+      if (a->base->ary[i] != NULL){
+         free(a->base->ary[i]);
       }
    }
-   for (i = 0; i < a->cuckooSize; i++){
-      if (a->cuckoo[i] != NULL){
-         free(a->cuckoo[i]);
+   for (i = 0; i < a->cuckoo->size; i++){
+      if (a->cuckoo->ary[i] != NULL){
+         free(a->cuckoo->ary[i]);
       }
    }
-   free(a->table);
+   free(a->base->ary);
+   free(a->base);
+   free(a->cuckoo->ary);
    free(a->cuckoo);
    free(a);
 }
@@ -179,24 +150,23 @@ entry *_createEntry(void *key, void *data){
    return e;
 }
 
-/*custom hashing equation, though partially inspired by djb2*/
+/*modified djb2 hash function from http://www.cse.yorku.ca/~oz/hash.html*/
 unsigned long _zktHash(assoc *a, void *key){
-   int length, position, count = 0;
    unsigned long hash = ZKTHASHINIT;
    unsigned char c;
+   int length, count = 0;
    if (a->useStrings == true){
       length = strlen((char *)key);
    }
    else{
       length = a->keySize;
    }
-   while(count < length){
+   while (count < length){
       c = *((unsigned char *)key + count);
-      position = count + 1;
-      hash = (c + (position)) * position * hash + ZKTHASHINIT;
+      hash = (hash * ZKTHASHFACT) + c;
       count++;
    }
-   return hash % (a->tableSize - 1) + 1;
+   return hash % a->cuckoo->size;
 }
 
 /*adapted djb2 hash function from http://www.cse.yorku.ca/~oz/hash.html*/
@@ -215,7 +185,7 @@ unsigned long _djb2Hash(assoc *a, void *key){
       hash = (hash * DJB2HASHFACT) + c;
       count++;
    }
-   return hash % a->tableSize;
+   return hash % a->base->size;
 }
 
 bool _rehash(assoc **a){
@@ -225,40 +195,129 @@ bool _rehash(assoc **a){
    }
    newA = assoc_init((*a)->keySize);
    newA->useStrings = (*a)->useStrings;
-   if (_rehashTable(*a, newA) == false){
-      return false;
-   }
+   while (_rehashTables(newA, *a) == false);
    assoc_free(*a);
    *a = newA;
    return true;
 }
 
-bool _rehashTable(assoc *old, assoc *new){
+bool _rehashTables(assoc *old, assoc *new){
    int i;
-   if (old == NULL || new == NULL){
+   bool stuck;
+   if (new == NULL || old == NULL){
       return false;
    }
-   new->tableSize = _nextPrime(old->tableSize * RESIZEFACT);
-   free(new->table);
-   new->table = ncalloc(new->tableSize, sizeof(entry *));
-   for (i = 0; i < old->tableSize; i++){
-      if (old->table[i] != NULL){
-         assoc_insert(&new, old->table[i]->key, old->table[i]->data);
+   new->base->size = old->base->size * RESIZEFACT;
+   free(new->base->ary);
+   new->base->ary = ncalloc(new->base->size, sizeof(entry *));
+   new->cuckoo->size = old->cuckoo->size * RESIZEFACT;
+   free(new->cuckoo->ary);
+   new->cuckoo->ary = ncalloc(new->cuckoo->size, sizeof(entry *));
+   for (i = 0; i < old->base->size; i++){
+      if (old->base->ary[i] != NULL){
+         stuck = !_rehashInsert(&new, old->base->ary[i]->key,
+            old->base->ary[i]->data);
       }
+   }
+   if (stuck == true){
+      _rehash(&old);
+      return false;
+   }
+   for (i = 0; i < old->cuckoo->size; i++){
+      if (old->cuckoo->ary[i] != NULL){
+         stuck = !_rehashInsert(&new, old->cuckoo->ary[i]->key,
+            old->cuckoo->ary[i]->data);
+      }
+   }
+   if (stuck == true){
+      _rehash(&old);
+      return false;
    }
    return true;
 }
 
-bool _shouldRehash(assoc *a){
+void _resizeTable()
+
+bool _rehashInsert(assoc** a, void* key, void* data){
+   entry *e;
+   bool found;
+   e = _createEntry(key, data);
+   found = _doCuckoo(a, e);
+   return found;
+}
+
+bool _shouldRehash(table *t){
    int capacity;
-   if (a == NULL){
+   if (t == NULL){
       return false;
    }
-   capacity = (int)(a->tableSize * REHASHMARK);
-   if (a->count > capacity){
+   capacity = (int)(t->size * REHASHMARK);
+   if (t->count > capacity){
       return true;
    }
    return false;
+}
+
+bool _doCuckoo(assoc **a, entry *e){
+   table *t;
+   unsigned long hash;
+   int rounds = 0;
+   bool shouldCuckoo, found = false;
+   do{
+      shouldCuckoo = _isOdd(rounds);
+      t = _specifyTable(*a, e->key, &hash, shouldCuckoo);
+      if(t->ary[hash] == NULL){
+         found = _addEntry(t, hash, e);
+      }
+      else{
+         if (_keysMatch(*a, t->ary[hash]->key, e->key) == true){
+            found = _updateEntry(t, hash, e);
+         }
+         else{
+            _swapEntry(&(t->ary[hash]), &e);
+            rounds++;
+         }
+      }
+   } while ((found == false) && (rounds < 4)); /*count < some number*/
+   return found;
+}
+bool _addEntry(table *t, int index, entry *e){
+   if (t == NULL || e == NULL){
+      return false;
+   }
+   if (index < 0 || index >= t->size){
+      return false;
+   }
+   t->ary[index] = e;
+   t->count += 1;
+   return true;
+}
+bool _updateEntry(table *t, int index, entry *e){
+   if (t == NULL || e == NULL){
+      return false;
+   }
+   if (index < 0 || index >= t->size){
+      return false;
+   }
+   t->ary[index]->data = e->data;
+   free(e);
+   return true;
+}
+void _swapEntry(entry **a, entry **b){
+   entry *tmp;
+   tmp = *a;
+   *a = *b;
+   *b = tmp;
+}
+table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo){
+   if (!cuckoo){
+      *hash = _djb2Hash(a, key);
+      return a->base;
+   }
+   else{
+      *hash = _zktHash(a, key);
+      return a->cuckoo;
+   }
 }
 
 int _nextPrime(const int n){
@@ -297,18 +356,21 @@ bool _isOdd(const int n){
 
 void _test(){
    assoc *test1, *test2, *test3, *test4;
-   entry *ent1, *ent2;
+   entry *ent1, *ent2, *ent3;
+   table *t1;
    int i, count, v1, v4, v5, v10, data;
    long v2, v6;
-   unsigned long placeholder, hash1, hash2, probe;
+   unsigned long placeholder, hash1, hash2;
    char v3[20], v7[20], v8[20], v9[20];
    /*assoc_init(-1);*/
    test1 = assoc_init(sizeof(int));
    test2 = assoc_init(sizeof(long));
    test3 = assoc_init(0);
    assert(test1 != NULL);
-   assert(test1->tableSize == INITSIZE);
-   assert(test1->count == 0);
+   assert(test1->base->size == INITSIZE);
+   assert(test1->cuckoo->size == INITSIZE);
+   assert(test1->base->count == 0);
+   assert(test1->cuckoo->count == 0);
    assert(test1->keySize == sizeof(int));
    assert(test1->useStrings == false);
    assert(test2 != NULL);
@@ -335,81 +397,127 @@ void _test(){
    v1 = 1024;
    placeholder = ((((((long)DJB2HASHINIT * DJB2HASHFACT + 0) * DJB2HASHFACT + 4)
       * DJB2HASHFACT + 0) * DJB2HASHFACT + 0));
-   assert(_djb2Hash(test1, &v1) == placeholder % test1->tableSize);
+   assert(_djb2Hash(test1, &v1) == placeholder % test1->base->size);
    v1 = 223;
    placeholder = ((((((long)DJB2HASHINIT * DJB2HASHFACT + 223)
       * DJB2HASHFACT + 0) * DJB2HASHFACT + 0) * DJB2HASHFACT + 0));
-   assert(_djb2Hash(test1, &v1) == placeholder % test1->tableSize);
+   assert(_djb2Hash(test1, &v1) == placeholder % test1->base->size);
    v2 = 1024;
    placeholder = (((((((((long)DJB2HASHINIT * DJB2HASHFACT + 0)
       * DJB2HASHFACT + 4) * DJB2HASHFACT + 0) * DJB2HASHFACT + 0)
       * DJB2HASHFACT + 0) * DJB2HASHFACT + 0) * DJB2HASHFACT + 0)
       * DJB2HASHFACT + 0);
-   assert(_djb2Hash(test2, &v2) == placeholder % test2->tableSize);
+   assert(_djb2Hash(test2, &v2) == placeholder % test2->base->size);
    strcpy(v3, "cab");
    placeholder = ((((long)DJB2HASHINIT * DJB2HASHFACT + 'c')
       * DJB2HASHFACT + 'a') * DJB2HASHFACT + 'b');
-   assert(_djb2Hash(test3, (void *)v3) == (placeholder % test3->tableSize));
+   assert(_djb2Hash(test3, (void *)v3) == (placeholder % test3->base->size));
 
    /*probe hashing with _zktHash*/
    v1 = 1024;
-   placeholder = (((((long)ZKTHASHINIT * (0 + 1) * 1 + ZKTHASHINIT)
-      * (4 + 2) * 2 + ZKTHASHINIT) * (0 + 3) * 3 + ZKTHASHINIT)
-      * (0 + 4) * 4 + ZKTHASHINIT);
-   assert(_zktHash(test1, &v1) == placeholder % (test1->tableSize - 1) + 1);
-   v1 = 212;
-   placeholder = (((((long)ZKTHASHINIT * (212 + 1) * 1 + ZKTHASHINIT)
-      * (0 + 2) * 2 + ZKTHASHINIT) * (0 + 3) * 3 + ZKTHASHINIT)
-      * (0 + 4) * 4 + ZKTHASHINIT);
-   assert(_zktHash(test1, &v1) == placeholder % (test1->tableSize - 1) + 1);
+   placeholder = ((((((long)ZKTHASHINIT * ZKTHASHFACT + 0) * ZKTHASHFACT + 4)
+      * ZKTHASHFACT + 0) * ZKTHASHFACT + 0));
+   assert(_zktHash(test1, &v1) == placeholder % test1->base->size);
+   v1 = 223;
+   placeholder = ((((((long)ZKTHASHINIT * ZKTHASHFACT + 223)
+      * ZKTHASHFACT + 0) * ZKTHASHFACT + 0) * ZKTHASHFACT + 0));
+   assert(_zktHash(test1, &v1) == placeholder % test1->base->size);
    v2 = 1024;
-   placeholder = (((((((((long)ZKTHASHINIT * (0 + 1) * 1 + ZKTHASHINIT)
-      * (4 + 2) * 2 + ZKTHASHINIT) * (0 + 3) * 3 + ZKTHASHINIT)
-      * (0 + 4) * 4 + ZKTHASHINIT) * (0 + 5) * 5 + ZKTHASHINIT)
-      * (0 + 6) * 6 + ZKTHASHINIT) * (0 + 7) * 7 + ZKTHASHINIT)
-      * (0 + 8) * 8 + ZKTHASHINIT);
-   assert(_zktHash(test2, &v2) == placeholder % (test1->tableSize - 1) + 1);
-   strcpy(v3, "bob");
-   placeholder = ((((long)ZKTHASHINIT * ('b' + 1) * 1 + ZKTHASHINIT)
-      * ('o' + 2) * 2 + ZKTHASHINIT) * ('b' + 3) * 3 + ZKTHASHINIT);
-   assert(_zktHash(test3, (void *)v3) == placeholder % (test1->tableSize - 1) + 1);
+   placeholder = (((((((((long)ZKTHASHINIT * ZKTHASHFACT + 0)
+      * ZKTHASHFACT + 4) * ZKTHASHFACT + 0) * ZKTHASHFACT + 0)
+      * ZKTHASHFACT + 0) * ZKTHASHFACT + 0) * ZKTHASHFACT + 0)
+      * ZKTHASHFACT + 0);
+   assert(_zktHash(test2, &v2) == placeholder % test2->base->size);
+   strcpy(v3, "cab");
+   placeholder = ((((long)ZKTHASHINIT * ZKTHASHFACT + 'c')
+      * ZKTHASHFACT + 'a') * ZKTHASHFACT + 'b');
+   assert(_zktHash(test3, (void *)v3) == (placeholder % test3->base->size));
 
    /*make sure things with different addresses hash the same if same value*/
    count = 0;
-   for (v1 = 0; v1 < 10; v1++){
+   for (v1 = 0; v1 < 100; v1++){
       v4 = v1;
       hash1 = _djb2Hash(test1, &v1);
       hash2 = _djb2Hash(test1, &v4);
       assert(hash1 == hash2);
-      assert(hash1 < (unsigned long)test1->tableSize);
+      assert(hash1 < (unsigned long)test1->base->size);
+      if (hash1 == 0){
+         count++;
+      }
+   }
+   assert(count > 0);
+   count = 0;
+   for (v1 = 0; v1 < 100; v1++){
+      v4 = v1;
+      hash1 = _zktHash(test1, &v1);
+      hash2 = _zktHash(test1, &v4);
+      assert(hash1 == hash2);
+      assert(hash1 < (unsigned long)test1->cuckoo->size);
       if (hash1 == 0){
          count++;
       }
    }
    assert(count > 0);
 
-   /*basic inserting and lookup, no probing yet*/
+   /*inserting helper functions*/
+   assert(_isOdd(1) == true);
+   assert(_isOdd(2) == false);
+   assert(_isOdd(0) == false);
+   assert(_isOdd(23) == true);
+   ent1 = _createEntry(&v1, NULL);
+   t1 = _specifyTable(test1, ent1->key, &hash1, false);
+   assert(memcmp(t1, test1->base, sizeof(table)) == 0);
+   assert(memcmp(t1, test1->cuckoo, sizeof(table)) != 0);
+   t1 = _specifyTable(test1, ent1->key, &hash1, true);
+   assert(memcmp(t1, test1->base, sizeof(table)) != 0);
+   assert(memcmp(t1, test1->cuckoo, sizeof(table)) == 0);
+   ent2 = _createEntry(&v2, NULL);
+   ent3 = ent1;
+   _swapEntry(&ent1, &ent2);
+   assert(memcmp(ent3, ent2, sizeof(entry)) == 0);
+   assert(!_addEntry(NULL, 0, ent1));
+   assert(!_addEntry(t1, 0, NULL));
+   assert(!_addEntry(t1, -1, ent1));
+   assert(!_addEntry(t1, INITSIZE, ent1));
+   assert(_addEntry(t1, 0, ent1));
+   assert(memcmp(t1->ary[0], ent1, sizeof(entry)) == 0);
+   assert(!_updateEntry(NULL, 0, ent1));
+   assert(!_updateEntry(t1, 0, NULL));
+   assert(!_updateEntry(t1, -1, ent1));
+   assert(!_updateEntry(t1, INITSIZE + 1, ent1));
+   ent3 = _createEntry(&v1, &v1);
+   assert(_updateEntry(t1, 0, ent3)); /*frees ent3*/
+   assert(memcmp((int *)t1->ary[0]->data, &v1, sizeof(int)) == 0);
+   ent1 = _createEntry(&v1, NULL);
+   assert(_doCuckoo(&test1, ent1));
+   free(ent1);
+   free(ent2);
+   free(test1);
+
+
+   /*basic inserting and lookup*/
+   test1 = assoc_init(sizeof(int));
    v1 = 1;
    assoc_insert(&test1, &v1, NULL);
-   assert(*(int *)(test1->table[_djb2Hash(test1, &v1)]->key) == v1);
-   assert(test1->count == 1);
+   assert(*(int *)(test1->base->ary[_djb2Hash(test1, &v1)]->key) == v1);
+   assert(test1->base->count == 1);
    assert(assoc_lookup(test1, &v1) == NULL);
    v4 = 3;
    v5 = 4;
    assoc_insert(&test1, &v4, &v5);
    assoc_insert(&test1, &v5, NULL);
-   assert(test1->count == 3);
+   assert(test1->base->count == 3);
    assert(assoc_lookup(test1, &v4) == &v5);
    v2 = 100;
    v6 = 10010101000000;
    assoc_insert(&test2, &v2, NULL);
    assoc_insert(&test2, &v6, &v2);
-   assert(test2->count == 2);
+   assert(test2->base->count == 2);
    assert(assoc_lookup(test2, &v6) == &v2);
    strcpy(v7, "avocado");
    assoc_insert(&test3, (void *)v3, NULL);
    assoc_insert(&test3, (void *)v7, (void *)v3);
-   assert(strcmp((char *)assoc_lookup(test3, (void *)v7), "bob") == 0);
+   assert(strcmp((char *)assoc_lookup(test3, (void *)v7), "cab") == 0);
    strcpy(v8, "avocado");
    assoc_insert(&test3, (void *)v8, NULL);
 
@@ -420,95 +528,80 @@ void _test(){
    assert(_keysMatch(test3, (void *)v7, (void *)v8) == true);
 
    /*test inserting + overwriting*/
-   assert(test3->count == 2);
+   assert(test3->base->count == 2);
    assoc_insert(&test3, (void *)v8, &v1);
-   assert(test3->count == 2);
+   assert(test3->base->count == 2);
    assert(*(int *)(assoc_lookup(test3, (void *)v8)) == v1);
 
    /*test probing and collisions*/
-   assert(_findNextProbe(test3, (unsigned long)3, (unsigned long) 5) == 15);
-   assert(_findNextProbe(test3, (unsigned long)3, (unsigned long) 2) == 1);
-   assert(_findNextProbe(test3, (unsigned long)3, (unsigned long) 3) == 0);
-   strcpy(v9, "avocada"); /*luckily a collision with "bob"*/
+   strcpy(v9, "avo"); /*collision with "cab"*/
    assert(_djb2Hash(test3, v9) == _djb2Hash(test3, v3));
-   probe = _findNextProbe(test3, _djb2Hash(test3, v9), _zktHash(test3, v9));
    assoc_insert(&test3, (void *)v9, NULL);
-   assert(strcmp(v9, (char *)test3->table[probe]->key) ==0);
-   assert(test3->count == 3);
-   assoc_insert(&test3, (void *)v9, NULL);
-   assert(test3->count == 3);
+   assert(test3->base->count == 2);
+   assert(test3->cuckoo->count == 1);
 
-   /*test, isOdd, isPrime, _nextPrime rehashing*/
-   assert(_shouldRehash(test1) == false);
-   assert(_shouldRehash(test2) == false);
-   assert(_shouldRehash(test3) == false);
+   /*test rehashing helper functions*/
+   assert(_shouldRehash(test1->base) == false);
+   assert(_shouldRehash(test2->base) == false);
+   assert(_shouldRehash(test3->base) == false);
+   assert(_shouldRehash(test1->cuckoo) == false);
+   assert(_shouldRehash(test2->cuckoo) == false);
+   assert(_shouldRehash(test3->cuckoo) == false);
+   t1 = NULL;
+   assert(_shouldRehash(t1) == false);
+   test1->base->count = test1->base->size * REHASHMARK + 1;
+   assert(_shouldRehash(test1->base) == true);
+   test1->base->count = 3;
    test4 = NULL;
-   assert(_shouldRehash(test4) == false);
-   test1->count = test1->tableSize * REHASHMARK + 1;
-   assert(_shouldRehash(test1) == true);
-   test1->count = 3;
-   assert(_isOdd(1) == true);
-   assert(_isOdd(2) == false);
-   assert(_isOdd(0) == false);
-   assert(_isOdd(23) == true);
-   assert(_isPrime(0) == false);
-   assert(_isPrime(1) == false);
-   assert(_isPrime(2) == true);
-   assert(_isPrime(3) == true);
-   assert(_isPrime(9) == false);
-   assert(_isPrime(23) == true);
-   assert(_nextPrime(1) == 2);
-   assert(_nextPrime(2) == 3);
-   assert(_nextPrime(3) == 5);
-   assert(_nextPrime(4) == 5);
-   assert(_nextPrime(9) == 11);
-   assert(_rehash(NULL) == false);
-   assert(_rehashTable(test1, test4) == false);
+   assert(_rehashTables(test1, test4) == false);
    test4 = assoc_init(sizeof(int));
-   assert(_rehashTable(test1, test4) == true);
-   assert(test4->tableSize == _nextPrime(test1->tableSize * RESIZEFACT));
+   assert(_rehashTables(test1, test4) == true);
+   assert(test4->base->size == test1->base->size * RESIZEFACT);
    count = 0;
-   for (i = 0; i < test4->tableSize; i++){
-      if (test4->table[i] != NULL){
+   for (i = 0; i < test4->base->size; i++){
+      if (test4->base->ary[i] != NULL){
          count++;
       }
    }
-   assert(count == test1->count);
+   assert(count == test1->base->count);
    assoc_free(test4);
+
+   assert(_rehash(NULL) == false);
+
 
    /*test again with strings*/
    test4 = assoc_init(0);
-   assert(_rehashTable(NULL, test4) == false);
-   assert(_rehashTable(test3, NULL) == false);
-   assert(_rehashTable(NULL, NULL) == false);
-   assert(_rehashTable(test3, test4) == true);
-   assert(test4->count == test3->count);
+   assert(_rehashTables(NULL, test4) == false);
+   assert(_rehashTables(test3, NULL) == false);
+   assert(_rehashTables(NULL, NULL) == false);
+   assert(_rehashTables(test3, test4) == true);
+   assert(test4->base->count == test3->base->count);
    assert(assoc_count(test4) == assoc_count(test3));
-   assert(test4->tableSize == _nextPrime(test3->tableSize * RESIZEFACT));
+   assert(test4->base->size == test3->base->size * RESIZEFACT );
    count = 0;
-   for (i = 0; i < test4->tableSize; i++){
-      if (test4->table[i] != NULL){
+   for (i = 0; i < test4->base->size; i++){
+      if (test4->base->ary[i] != NULL){
          count++;
       }
    }
-   assert(count == test4->count);
+   assert(count == test4->base->count);
    assoc_free(test4);
    test4 = NULL;
    assert(_rehash(&test4) == false);
    assert(_rehash(&test1) == true);
    assert(_rehash(&test2) == true);
    assert(_rehash(&test3) == true);
-   assert(test1->tableSize == _nextPrime(INITSIZE * RESIZEFACT));
-   assert(test1->count == 3);
+   printf("this is the current size: %d\n", test1->base->size);
+   assert(test1->base->size == INITSIZE * RESIZEFACT);
+   assert(test1->base->count == 3);
    assert(test1->useStrings == false);
-   assert(test1->table[36] != NULL);
    count = 0;
-   for (i = 0; i < test1->tableSize; i++){
-      if (test1->table[i] != NULL){
+   for (i = 0; i < test1->base->size; i++){
+      if (test1->base->ary[i] != NULL){
          count++;
       }
    }
-   assert(count == test1->count);
+   assert(count == test1->base->count);
 
    /*larger scale testing*/
    /*assoc_free(test1);
@@ -523,7 +616,17 @@ void _test(){
    assert(test1->count == 1000);
    i = i - 1;
    assert(assoc_lookup(test1, &i) != NULL);*/
-
+   assert(_isPrime(0) == false);
+   assert(_isPrime(1) == false);
+   assert(_isPrime(2) == true);
+   assert(_isPrime(3) == true);
+   assert(_isPrime(9) == false);
+   assert(_isPrime(23) == true);
+   assert(_nextPrime(1) == 2);
+   assert(_nextPrime(2) == 3);
+   assert(_nextPrime(3) == 5);
+   assert(_nextPrime(4) == 5);
+   assert(_nextPrime(9) == 11);
    assoc_free(test1);
    assoc_free(test2);
    assoc_free(test3);

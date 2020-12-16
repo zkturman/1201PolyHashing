@@ -1,6 +1,6 @@
 #include "../../../ADTs/General/bool.h"
 
-#define INITSIZE 17
+#define INITSIZE 16
 #define STRINGTYPE 0
 
 struct entry{
@@ -9,13 +9,17 @@ struct entry{
 };
 typedef struct entry entry;
 
-struct assoc{
-   entry **table;
-   entry **cTable;
+struct table{
+   entry **ary;
+   int size;
    int count;
-   int cCount;
-   int tableSize;
-   int cuckooSize;
+};
+typedef struct table table;
+
+struct assoc{
+   table *base;
+   table *cuckoo;
+   int mod;
    int keySize;
    int useStrings;
 };

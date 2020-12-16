@@ -51,7 +51,9 @@ void assoc_insert(assoc** a, void* key, void* data){
    int hash, nextHash, probe;
    e = _createEntry(key, data);
    if (_shouldRehash(*a) == true){
-      _rehash(a);
+      if (!_rehash(a)){
+         on_error("Tried to rehash a null table\n");
+      }
    }
    hash = _djb2Hash(*a, e->key);
    nextHash = hash;
