@@ -1,35 +1,76 @@
 #include "specific.h"
 #include "../assoc.h"
 
-#define INITSIZE 17
+#define INITSIZE 16
 #define STRINGTYPE 0
 #define DJB2HASHINIT 5381
 #define DJB2HASHFACT 33
-#define ZKTHASHINIT  3371
-#define ZKTHASHFACT 29
+#define ZKTHASHINIT  1000
+#define ZKTHASHFACT 33
 #define REHASHMARK 0.6
-#define RESIZEFACT 1.5
+#define RESIZEFACT 2.0
+#define LOGBASE 2
+#define EVENMOD 2
 
+/**/
 table *_createTable();
+
+/**/
 table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo);
+
+/**/
 entry *_createEntry(void *key, void *data);
-unsigned long _zktHash(assoc *a, void *key);
+
+/*http://www.cse.yorku.ca/~oz/hash.html*/
+unsigned long _sdbmHash(assoc *a, void *key);
+
+/**/
 unsigned long _djb2Hash(assoc *a, void *key);
+
+/**/
 unsigned long _findNextProbe(assoc *a, unsigned long hash, unsigned long probe);
+
+/**/
 bool _rehash(assoc **a);
-bool _rehashBothTables(assoc *old, assoc *new);
-bool _rehashSingleTable(assoc *newA, table *oldT);
+
+/**/
+bool _rehashBothTables(assoc *old, assoc **new);
+
+/**/
+bool _rehashSingleTable(assoc **newA, table *oldT);
+
+/**/
 bool _shouldRehash(table *t);
+
+
 int _nextPrime(const int n);
 bool _isPrime(const int n);
+
+/**/
 bool _isOdd(const int n);
+
+/**/
 bool _keysMatch(assoc *a, void *x, void *y);
-bool _doCuckoo(assoc **a, entry *e);
+
+/**/
+bool _doCuckoo(assoc **a, entry **e);
+
+/**/
 bool _addEntry(table *t, int index, entry *e);
+
+/**/
 bool _updateEntry(table *t, int index, entry *e);
+
+/**/
 void _swapEntry(entry **a, entry **b);
+
+/**/
 bool _rehashInsert(assoc** a, void* key, void* data);
-void _resizeTable(table *old, table **new, int fact);
+
+/**/
+void _resizeTable(table *old, table *new, int fact);
+
+/**/
 int _log2(int n);
 
 /*
@@ -62,10 +103,12 @@ void assoc_insert(assoc** a, void* key, void* data){
    entry *e;
    bool found;
    e = _createEntry(key, data);
-   found = _doCuckoo(a, e);
-   _rehash(a);
-   if (found == false){
-      assoc_insert(a, e->key, e->data);
+   found = _doCuckoo(a, &e);
+   if (found == false || _shouldRehash((*a)->base) || _shouldRehash((*a)->cuckoo)){
+      _rehash(a);
+      if (found == false){
+         assoc_insert(a, e->key, e->data);
+      }
    }
 }
 
@@ -84,12 +127,14 @@ unsigned int assoc_count(assoc* a){
 void* assoc_lookup(assoc* a, void* key){
    unsigned long hash, cHash;
    hash = _djb2Hash(a, key);
-   cHash = _zktHash(a, key);
-   if (_keysMatch(a, a->base->ary[hash]->key, key) == true){
+   cHash = _sdbmHash(a, key);
+   if ((a->base->ary[hash] != NULL)
+      && (_keysMatch(a, a->base->ary[hash]->key, key) == true)){
       return a->base->ary[hash]->data;
    }
-   if (_keysMatch(a, a->cuckoo->ary[cHash]->key, key) == true){
-      return a->base->ary[cHash]->data;
+   if ((a->cuckoo->ary[cHash] != NULL)
+      && (_keysMatch(a, a->cuckoo->ary[cHash]->key, key) == true)){
+      return a->cuckoo->ary[cHash]->data;
    }
    return NULL;
 }
@@ -142,7 +187,7 @@ entry *_createEntry(void *key, void *data){
 }
 
 /*modified djb2 hash function from http://www.cse.yorku.ca/~oz/hash.html*/
-unsigned long _zktHash(assoc *a, void *key){
+unsigned long _sdbmHash(assoc *a, void *key){
    unsigned long hash = ZKTHASHINIT;
    unsigned char c;
    int length, count = 0;
@@ -154,7 +199,7 @@ unsigned long _zktHash(assoc *a, void *key){
    }
    while (count < length){
       c = *((unsigned char *)key + count);
-      hash = (hash * ZKTHASHFACT) + c;
+      hash = c + (hash << 6) + (hash << 16) - hash;
       count++;
    }
    return hash % a->cuckoo->size;
@@ -194,27 +239,28 @@ bool _rehash(assoc **a){
    }
    newA = assoc_init((*a)->keySize);
    newA->useStrings = (*a)->useStrings;
-   _rehashBothTables(*a, newA);
+   _rehashBothTables(*a, &newA);
    assoc_free(*a);
    *a = newA;
    return true;
 }
 
-bool _rehashBothTables(assoc *old, assoc *new){
+bool _rehashBothTables(assoc *old, assoc **new){
    int fact = 1;
    bool stuck = false;
    if (new == NULL || old == NULL){
       return false;
    }
    do{
-      printf("stuck here? %d\n", stuck);
       fact = (int)(fact * RESIZEFACT);
-      _resizeTable(old->base, &(new->base), fact);
-      _resizeTable(old->cuckoo, &(new->cuckoo), fact);
+      _resizeTable(old->base, (*new)->base, fact);
+      _resizeTable(old->cuckoo, (*new)->cuckoo, fact);
       if (_rehashSingleTable(new, old->base) == true){
+         printf("we hit here\n");
          stuck = true;
       }
       else if (_rehashSingleTable(new, old->cuckoo) == true){
+         printf("we hit here\n");
          stuck = true;
       }
       else{
@@ -224,30 +270,42 @@ bool _rehashBothTables(assoc *old, assoc *new){
    return true;
 }
 
-bool _rehashSingleTable(assoc *newA, table *oldT){
+bool _rehashSingleTable(assoc **newA, table *oldT){
    int i;
-   bool stuck;
+   bool stuck = false;
    for (i = 0; i < oldT->size; i++){
       if (oldT->ary[i] != NULL){
-         stuck = !_rehashInsert(&newA, oldT->ary[i]->key,
-            oldT->ary[i]->data);
+         stuck = !(_rehashInsert(newA, oldT->ary[i]->key,
+            oldT->ary[i]->data));
       }
    }
    return stuck;
-}
-
-void _resizeTable(table *old, table **new, int fact){
-   (*new)->size = old->size * fact;
-   free((*new)->ary);
-   (*new)->ary = ncalloc((*new)->size, sizeof(entry *));
 }
 
 bool _rehashInsert(assoc** a, void* key, void* data){
    entry *e;
    bool found;
    e = _createEntry(key, data);
-   found = _doCuckoo(a, e);
+   found = _doCuckoo(a, &e);
+   if (found == false){
+      printf("we had to rehash while rehashing.\n");
+      free(e);
+   }
    return found;
+}
+
+void _resizeTable(table *old, table *new, int fact){
+   int i;
+   /*if we need to resize multiple times, we need to clear the array*/
+   for (i = 0; i < new->size; i++){
+      if (new->ary[i] != NULL){
+         free(new->ary[i]);
+      }
+   }
+   new->count = 0;
+   new->size = old->size * fact;
+   free(new->ary);
+   new->ary = ncalloc(new->size, sizeof(entry *));
 }
 
 bool _shouldRehash(table *t){
@@ -262,30 +320,27 @@ bool _shouldRehash(table *t){
    return false;
 }
 
-bool _doCuckoo(assoc **a, entry *e){
+bool _doCuckoo(assoc **a, entry **e){
    table *t;
    unsigned long hash;
    int rounds = 0;
    bool shouldCuckoo, found = false;
    do{
       shouldCuckoo = _isOdd(rounds);
-      t = _specifyTable(*a, e->key, &hash, shouldCuckoo);
+      t = _specifyTable(*a, (*e)->key, &hash, shouldCuckoo);
       if(t->ary[hash] == NULL){
-         found = _addEntry(t, hash, e);
+         found = _addEntry(t, hash, *e);
       }
       else{
-         if (_keysMatch(*a, t->ary[hash]->key, e->key) == true){
-            printf("we hit this\n");
-            found = _updateEntry(t, hash, e);
+         if (_keysMatch(*a, t->ary[hash]->key, (*e)->key) == true){
+            found = _updateEntry(t, hash, *e);
          }
          else{
-            _swapEntry(&(t->ary[hash]), &e);
+            _swapEntry(&(t->ary[hash]), e);
             rounds++;
          }
       }
-      printf("stuck here? %d - %d\n",found, rounds);
    } while ((found == false) && (rounds < _log2((*a)->base->size)));
-   printf("stuck here?\n");
    return found;
 }
 
@@ -293,7 +348,7 @@ int _log2(int n){
    int count = 0, val;
    val = n;
    while (val > 0){
-      val /= 2;
+      val /= LOGBASE;
       count ++;
    }
    return count;
@@ -336,43 +391,13 @@ table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo){
       return a->base;
    }
    else{
-      *hash = _zktHash(a, key);
+      *hash = _sdbmHash(a, key);
       return a->cuckoo;
    }
 }
 
-int _nextPrime(const int n){
-   int i, next = 0;
-   i = n;
-   while (next == 0){
-      i++;
-      if (_isOdd(i) || i == 2){
-         if (_isPrime(i) == true){
-            next = i;
-         }
-      }
-   }
-   return next;
-}
-
-bool _isPrime(const int n){
-   int i;
-   if (n < 2){
-      return false;
-   }
-   if (n == 2){
-      return true;
-   }
-   for (i = 2; i < n / 2; i++){
-      if (n % i == 0){
-         return false;
-      }
-   }
-   return true;
-}
-
 bool _isOdd(const int n){
-   return n % 2;
+   return n % EVENMOD;
 }
 
 void _test(){
@@ -382,7 +407,7 @@ void _test(){
    int i, count, v1, v4, v5, v10, data;
    long v2, v6;
    unsigned long placeholder, hash1, hash2;
-   char v3[20], v7[20], v8[20], v9[20];
+   char v3[20], v7[20], v8[20];/*, v9[20];*/
    /*assoc_init(-1);*/
    test1 = assoc_init(sizeof(int));
    test2 = assoc_init(sizeof(long));
@@ -434,26 +459,6 @@ void _test(){
       * DJB2HASHFACT + 'a') * DJB2HASHFACT + 'b');
    assert(_djb2Hash(test3, (void *)v3) == (placeholder % test3->base->size));
 
-   /*probe hashing with _zktHash*/
-   v1 = 1024;
-   placeholder = ((((((long)ZKTHASHINIT * ZKTHASHFACT + 0) * ZKTHASHFACT + 4)
-      * ZKTHASHFACT + 0) * ZKTHASHFACT + 0));
-   assert(_zktHash(test1, &v1) == placeholder % test1->base->size);
-   v1 = 223;
-   placeholder = ((((((long)ZKTHASHINIT * ZKTHASHFACT + 223)
-      * ZKTHASHFACT + 0) * ZKTHASHFACT + 0) * ZKTHASHFACT + 0));
-   assert(_zktHash(test1, &v1) == placeholder % test1->base->size);
-   v2 = 1024;
-   placeholder = (((((((((long)ZKTHASHINIT * ZKTHASHFACT + 0)
-      * ZKTHASHFACT + 4) * ZKTHASHFACT + 0) * ZKTHASHFACT + 0)
-      * ZKTHASHFACT + 0) * ZKTHASHFACT + 0) * ZKTHASHFACT + 0)
-      * ZKTHASHFACT + 0);
-   assert(_zktHash(test2, &v2) == placeholder % test2->base->size);
-   strcpy(v3, "cab");
-   placeholder = ((((long)ZKTHASHINIT * ZKTHASHFACT + 'c')
-      * ZKTHASHFACT + 'a') * ZKTHASHFACT + 'b');
-   assert(_zktHash(test3, (void *)v3) == (placeholder % test3->base->size));
-
    /*make sure things with different addresses hash the same if same value*/
    count = 0;
    for (v1 = 0; v1 < 100; v1++){
@@ -462,18 +467,6 @@ void _test(){
       hash2 = _djb2Hash(test1, &v4);
       assert(hash1 == hash2);
       assert(hash1 < (unsigned long)test1->base->size);
-      if (hash1 == 0){
-         count++;
-      }
-   }
-   assert(count > 0);
-   count = 0;
-   for (v1 = 0; v1 < 100; v1++){
-      v4 = v1;
-      hash1 = _zktHash(test1, &v1);
-      hash2 = _zktHash(test1, &v4);
-      assert(hash1 == hash2);
-      assert(hash1 < (unsigned long)test1->cuckoo->size);
       if (hash1 == 0){
          count++;
       }
@@ -510,7 +503,7 @@ void _test(){
    assert(_updateEntry(t1, 0, ent3)); /*frees ent3*/
    assert(memcmp((int *)t1->ary[0]->data, &v1, sizeof(int)) == 0);
    ent1 = _createEntry(&v1, NULL);
-   assert(_doCuckoo(&test1, ent1));
+   assert(_doCuckoo(&test1, &ent1));
    free(ent2);
    assoc_free(test1);
 
@@ -554,11 +547,11 @@ void _test(){
    assert(*(int *)(assoc_lookup(test3, (void *)v8)) == v1);
 
    /*test probing and collisions*/
-   strcpy(v9, "avo"); /*collision with "cab"*/
+   /*strcpy(v9, "avo");
    assert(_djb2Hash(test3, v9) == _djb2Hash(test3, v3));
    assoc_insert(&test3, (void *)v9, NULL);
    assert(test3->base->count == 2);
-   assert(test3->cuckoo->count == 1);
+   assert(test3->cuckoo->count == 1);*/
 
    /*test rehashing helper functions*/
    assert(_shouldRehash(test1->base) == false);
@@ -577,15 +570,15 @@ void _test(){
    assert(_rehashInsert(&test4, &v1, NULL));
    assoc_free(test4);
    test4 = assoc_init(sizeof(int));
-   _resizeTable(test1->base, &test4->base, 2);
+   _resizeTable(test1->base, test4->base, 2);
    assert(test4->base->size == test1->base->size * 2);
-   assert(!_rehashSingleTable(test4, test1->base)); /*shouldn't be stuck*/
-   assert(!_rehashSingleTable(test4, test1->cuckoo));
+   assert(!_rehashSingleTable(&test4, test1->base)); /*shouldn't be stuck*/
+   assert(!_rehashSingleTable(&test4, test1->cuckoo));
    assoc_free(test4);
    test4 = NULL;
-   assert(_rehashBothTables(test1, test4) == false);
+   assert(_rehashBothTables(test1, &test4) == false);
    test4 = assoc_init(sizeof(int));
-   assert(_rehashBothTables(test1, test4) == true);
+   assert(_rehashBothTables(test1, &test4) == true);
    assert(test4->base->size == (int) (test1->base->size * RESIZEFACT));
    count = 0;
    for (i = 0; i < test4->base->size; i++){
@@ -598,10 +591,10 @@ void _test(){
 
    /*test again with strings*/
    test4 = assoc_init(0);
-   assert(_rehashBothTables(NULL, test4) == false);
+   assert(_rehashBothTables(NULL, &test4) == false);
    assert(_rehashBothTables(test3, NULL) == false);
    assert(_rehashBothTables(NULL, NULL) == false);
-   assert(_rehashBothTables(test3, test4) == true);
+   assert(_rehashBothTables(test3, &test4) == true);
    assert(test4->base->count == test3->base->count);
    assert(assoc_count(test4) == assoc_count(test3));
    assert(test4->base->size == (int) (test3->base->size * RESIZEFACT));
@@ -644,17 +637,6 @@ void _test(){
    assert(test1->count == 1000);
    i = i - 1;
    assert(assoc_lookup(test1, &i) != NULL);*/
-   assert(_isPrime(0) == false);
-   assert(_isPrime(1) == false);
-   assert(_isPrime(2) == true);
-   assert(_isPrime(3) == true);
-   assert(_isPrime(9) == false);
-   assert(_isPrime(23) == true);
-   assert(_nextPrime(1) == 2);
-   assert(_nextPrime(2) == 3);
-   assert(_nextPrime(3) == 5);
-   assert(_nextPrime(4) == 5);
-   assert(_nextPrime(9) == 11);
    assoc_free(test1);
    assoc_free(test2);
    assoc_free(test3);

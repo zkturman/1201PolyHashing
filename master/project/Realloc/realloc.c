@@ -8,12 +8,16 @@
 #define ZKTHASHINIT  331
 #define REHASHMARK 0.6
 #define RESIZEFACT 2
+#define LOWESTPRIME 2
+#define PRIMEMAXHELP 2
+#define EVENMOD 2
 
 /*Creates a key/data pair structure*/
 entry *_createEntry(void *key, void *data);
 
-/*Hash function used for hash probing. It that loops through the bytes of a key
-value. The function is inspired by DJB2, but attempts a unique spin.*/
+/*Hash function used for probing. It loops through the bytes of a key value.
+The function is inspired by DJB2, but a bit of a spin.
+http://www.cse.yorku.ca/~oz/hash.html*/
 unsigned long _zktHash(assoc *a, void *key);
 
 /*DJB2 hash function that loops through byts of a key value. The function is
@@ -23,8 +27,8 @@ unsigned long _djb2Hash(assoc *a, void *key);
 /*Finds the next hash index when a collision is encountered*/
 unsigned long _findNextProbe(assoc *a, unsigned long hash, unsigned long probe);
 
-/*Creates a new assoc structure, resizes its data table. It rehashes the
-existing data into the */
+/*Creates a new assoc structure and resizes its data table. It rehashes the
+existing data after resizing.*/
 bool _rehash(assoc **a);
 
 /*Used to resize and rehash data from one assoc's table to another's*/
@@ -36,7 +40,7 @@ bool _shouldRehash(assoc *a);
 /*Finds the next prime number in sequence starting from n*/
 int _nextPrime(const int n);
 
-/*Returns true n is prime*/
+/*Returns true if n is prime*/
 bool _isPrime(const int n);
 
 /*Returns true if n is odd*/
@@ -56,7 +60,7 @@ bool _keysMatch(assoc *a, void *x, void *y);
 assoc* assoc_init(int keysize){
    assoc *a;
    if (keysize < 0){
-      on_error("Negative keysize? Exiting.");
+      on_error("Negative keysize...exiting.");
    }
    a = (assoc *)ncalloc(1, sizeof(assoc));
    a->tableSize = INITSIZE;
@@ -77,10 +81,8 @@ void assoc_insert(assoc** a, void* key, void* data){
    entry *e;
    int hash, nextHash, probe;
    e = _createEntry(key, data);
-   if (_shouldRehash(*a) == true){
-      if (!_rehash(a)){
-         on_error("Tried to rehash a null table\n");
-      }
+   if ((_shouldRehash(*a) == true) && (_rehash(a) == false)){
+      on_error("Failed to rehash the table... exiting\n");
    }
    hash = _djb2Hash(*a, e->key);
    nextHash = hash;
@@ -99,10 +101,7 @@ void assoc_insert(assoc** a, void* key, void* data){
          }
       }
       nextHash = _findNextProbe(*a, nextHash, probe);
-   } while (nextHash != hash);
-   if (nextHash == hash){
-      on_error("Probe should never fully wrap around to starting hash...\n");
-   }
+   } while (nextHash != hash); /*will never reach this because size limits*/
 }
 
 unsigned long _findNextProbe(assoc *a, unsigned long hash, unsigned long probe){
@@ -145,8 +144,6 @@ void* assoc_lookup(assoc* a, void* key){
    } while (nextHash != hash);
    return NULL;
 }
-
-void assoc_todot(assoc* a);
 
 /* Free up all allocated space from 'a' */
 void assoc_free(assoc* a){
@@ -282,13 +279,13 @@ int _nextPrime(const int n){
 
 bool _isPrime(const int n){
    int i;
-   if (n < 2){
+   if (n < LOWESTPRIME){
       return false;
    }
-   if (n == 2){
+   if (n == LOWESTPRIME){
       return true;
    }
-   for (i = 2; i < n / 2; i++){
+   for (i = LOWESTPRIME; i < n / PRIMEMAXHELP; i++){
       if (n % i == 0){
          return false;
       }
@@ -297,7 +294,7 @@ bool _isPrime(const int n){
 }
 
 bool _isOdd(const int n){
-   return n % 2;
+   return n % EVENMOD;
 }
 
 void _test(){
