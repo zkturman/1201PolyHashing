@@ -21,10 +21,12 @@ table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo);
 /**/
 entry *_createEntry(void *key, void *data);
 
-/*http://www.cse.yorku.ca/~oz/hash.html*/
+/*Generates an SDBM hash from http://www.cse.yorku.ca/~oz/hash.html. This is
+the hash used for the cuckoo table.*/
 unsigned long _sdbmHash(assoc *a, void *key);
 
-/**/
+/*Generates a DJB2 hash based on code found:
+ http://www.cse.yorku.ca/~oz/hash.html. This hash is used for the base table.*/
 unsigned long _djb2Hash(assoc *a, void *key);
 
 /**/
@@ -104,10 +106,12 @@ void assoc_insert(assoc** a, void* key, void* data){
    bool found;
    e = _createEntry(key, data);
    found = _doCuckoo(a, &e);
-   if (found == false || _shouldRehash((*a)->base) || _shouldRehash((*a)->cuckoo)){
+   if (found == false || _shouldRehash((*a)->base)
+      || _shouldRehash((*a)->cuckoo)){
       _rehash(a);
       if (found == false){
          assoc_insert(a, e->key, e->data);
+         free(e);
       }
    }
 }
@@ -186,7 +190,7 @@ entry *_createEntry(void *key, void *data){
    return e;
 }
 
-/*modified djb2 hash function from http://www.cse.yorku.ca/~oz/hash.html*/
+/*sdbm from http://www.cse.yorku.ca/~oz/hash.html*/
 unsigned long _sdbmHash(assoc *a, void *key){
    unsigned long hash = ZKTHASHINIT;
    unsigned char c;
@@ -256,11 +260,9 @@ bool _rehashBothTables(assoc *old, assoc **new){
       _resizeTable(old->base, (*new)->base, fact);
       _resizeTable(old->cuckoo, (*new)->cuckoo, fact);
       if (_rehashSingleTable(new, old->base) == true){
-         printf("we hit here\n");
          stuck = true;
       }
       else if (_rehashSingleTable(new, old->cuckoo) == true){
-         printf("we hit here\n");
          stuck = true;
       }
       else{
@@ -288,7 +290,6 @@ bool _rehashInsert(assoc** a, void* key, void* data){
    e = _createEntry(key, data);
    found = _doCuckoo(a, &e);
    if (found == false){
-      printf("we had to rehash while rehashing.\n");
       free(e);
    }
    return found;
