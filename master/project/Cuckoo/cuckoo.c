@@ -1,13 +1,14 @@
 #include "specific.h"
 #include "../assoc.h"
 
-
+#define INITSIZE 17
+#define STRINGTYPE 0
 #define DJB2HASHINIT 5381
 #define DJB2HASHFACT 33
-#define ZKTHASHINIT  337
-#define ZKTHASHFACT 23
+#define ZKTHASHINIT  3371
+#define ZKTHASHFACT 29
 #define REHASHMARK 0.6
-#define RESIZEFACT 2
+#define RESIZEFACT 1.5
 
 table *_createTable();
 table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo);
@@ -16,7 +17,8 @@ unsigned long _zktHash(assoc *a, void *key);
 unsigned long _djb2Hash(assoc *a, void *key);
 unsigned long _findNextProbe(assoc *a, unsigned long hash, unsigned long probe);
 bool _rehash(assoc **a);
-bool _rehashTables(assoc *old, assoc *new);
+bool _rehashBothTables(assoc *old, assoc *new);
+bool _rehashSingleTable(assoc *newA, table *oldT);
 bool _shouldRehash(table *t);
 int _nextPrime(const int n);
 bool _isPrime(const int n);
@@ -27,9 +29,8 @@ bool _addEntry(table *t, int index, entry *e);
 bool _updateEntry(table *t, int index, entry *e);
 void _swapEntry(entry **a, entry **b);
 bool _rehashInsert(assoc** a, void* key, void* data);
-
-
-
+void _resizeTable(table *old, table **new, int fact);
+int _log2(int n);
 
 /*
    Initialise the Associative array
@@ -52,14 +53,6 @@ assoc* assoc_init(int keysize){
    return a;
 }
 
-table *_createTable(){
-   table *t;
-   t = ncalloc(1, sizeof(table));
-   t->size = INITSIZE;
-   t->ary = ncalloc(t->size, sizeof(entry *));
-   return t;
-}
-
 /*
    Insert key/data pair
    - may cause resize, therefore 'a' might
@@ -70,9 +63,7 @@ void assoc_insert(assoc** a, void* key, void* data){
    bool found;
    e = _createEntry(key, data);
    found = _doCuckoo(a, e);
-   /*
    _rehash(a);
-   */
    if (found == false){
       assoc_insert(a, e->key, e->data);
    }
@@ -188,6 +179,14 @@ unsigned long _djb2Hash(assoc *a, void *key){
    return hash % a->base->size;
 }
 
+table *_createTable(){
+   table *t;
+   t = ncalloc(1, sizeof(table));
+   t->size = INITSIZE;
+   t->ary = ncalloc(t->size, sizeof(entry *));
+   return t;
+}
+
 bool _rehash(assoc **a){
    assoc *newA;
    if (a == NULL || *a == NULL){
@@ -195,48 +194,53 @@ bool _rehash(assoc **a){
    }
    newA = assoc_init((*a)->keySize);
    newA->useStrings = (*a)->useStrings;
-   while (_rehashTables(newA, *a) == false);
+   _rehashBothTables(*a, newA);
    assoc_free(*a);
    *a = newA;
    return true;
 }
 
-bool _rehashTables(assoc *old, assoc *new){
-   int i;
-   bool stuck;
+bool _rehashBothTables(assoc *old, assoc *new){
+   int fact = 1;
+   bool stuck = false;
    if (new == NULL || old == NULL){
       return false;
    }
-   new->base->size = old->base->size * RESIZEFACT;
-   free(new->base->ary);
-   new->base->ary = ncalloc(new->base->size, sizeof(entry *));
-   new->cuckoo->size = old->cuckoo->size * RESIZEFACT;
-   free(new->cuckoo->ary);
-   new->cuckoo->ary = ncalloc(new->cuckoo->size, sizeof(entry *));
-   for (i = 0; i < old->base->size; i++){
-      if (old->base->ary[i] != NULL){
-         stuck = !_rehashInsert(&new, old->base->ary[i]->key,
-            old->base->ary[i]->data);
+   do{
+      printf("stuck here? %d\n", stuck);
+      fact = (int)(fact * RESIZEFACT);
+      _resizeTable(old->base, &(new->base), fact);
+      _resizeTable(old->cuckoo, &(new->cuckoo), fact);
+      if (_rehashSingleTable(new, old->base) == true){
+         stuck = true;
       }
-   }
-   if (stuck == true){
-      _rehash(&old);
-      return false;
-   }
-   for (i = 0; i < old->cuckoo->size; i++){
-      if (old->cuckoo->ary[i] != NULL){
-         stuck = !_rehashInsert(&new, old->cuckoo->ary[i]->key,
-            old->cuckoo->ary[i]->data);
+      else if (_rehashSingleTable(new, old->cuckoo) == true){
+         stuck = true;
       }
-   }
-   if (stuck == true){
-      _rehash(&old);
-      return false;
-   }
+      else{
+         stuck = false;
+      }
+   } while (stuck == true);
    return true;
 }
 
-void _resizeTable()
+bool _rehashSingleTable(assoc *newA, table *oldT){
+   int i;
+   bool stuck;
+   for (i = 0; i < oldT->size; i++){
+      if (oldT->ary[i] != NULL){
+         stuck = !_rehashInsert(&newA, oldT->ary[i]->key,
+            oldT->ary[i]->data);
+      }
+   }
+   return stuck;
+}
+
+void _resizeTable(table *old, table **new, int fact){
+   (*new)->size = old->size * fact;
+   free((*new)->ary);
+   (*new)->ary = ncalloc((*new)->size, sizeof(entry *));
+}
 
 bool _rehashInsert(assoc** a, void* key, void* data){
    entry *e;
@@ -271,6 +275,7 @@ bool _doCuckoo(assoc **a, entry *e){
       }
       else{
          if (_keysMatch(*a, t->ary[hash]->key, e->key) == true){
+            printf("we hit this\n");
             found = _updateEntry(t, hash, e);
          }
          else{
@@ -278,9 +283,22 @@ bool _doCuckoo(assoc **a, entry *e){
             rounds++;
          }
       }
-   } while ((found == false) && (rounds < 4)); /*count < some number*/
+      printf("stuck here? %d - %d\n",found, rounds);
+   } while ((found == false) && (rounds < _log2((*a)->base->size)));
+   printf("stuck here?\n");
    return found;
 }
+
+int _log2(int n){
+   int count = 0, val;
+   val = n;
+   while (val > 0){
+      val /= 2;
+      count ++;
+   }
+   return count;
+}
+
 bool _addEntry(table *t, int index, entry *e){
    if (t == NULL || e == NULL){
       return false;
@@ -292,6 +310,7 @@ bool _addEntry(table *t, int index, entry *e){
    t->count += 1;
    return true;
 }
+
 bool _updateEntry(table *t, int index, entry *e){
    if (t == NULL || e == NULL){
       return false;
@@ -303,12 +322,14 @@ bool _updateEntry(table *t, int index, entry *e){
    free(e);
    return true;
 }
+
 void _swapEntry(entry **a, entry **b){
    entry *tmp;
    tmp = *a;
    *a = *b;
    *b = tmp;
 }
+
 table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo){
    if (!cuckoo){
       *hash = _djb2Hash(a, key);
@@ -490,9 +511,8 @@ void _test(){
    assert(memcmp((int *)t1->ary[0]->data, &v1, sizeof(int)) == 0);
    ent1 = _createEntry(&v1, NULL);
    assert(_doCuckoo(&test1, ent1));
-   free(ent1);
    free(ent2);
-   free(test1);
+   assoc_free(test1);
 
 
    /*basic inserting and lookup*/
@@ -553,10 +573,20 @@ void _test(){
    assert(_shouldRehash(test1->base) == true);
    test1->base->count = 3;
    test4 = NULL;
-   assert(_rehashTables(test1, test4) == false);
    test4 = assoc_init(sizeof(int));
-   assert(_rehashTables(test1, test4) == true);
-   assert(test4->base->size == test1->base->size * RESIZEFACT);
+   assert(_rehashInsert(&test4, &v1, NULL));
+   assoc_free(test4);
+   test4 = assoc_init(sizeof(int));
+   _resizeTable(test1->base, &test4->base, 2);
+   assert(test4->base->size == test1->base->size * 2);
+   assert(!_rehashSingleTable(test4, test1->base)); /*shouldn't be stuck*/
+   assert(!_rehashSingleTable(test4, test1->cuckoo));
+   assoc_free(test4);
+   test4 = NULL;
+   assert(_rehashBothTables(test1, test4) == false);
+   test4 = assoc_init(sizeof(int));
+   assert(_rehashBothTables(test1, test4) == true);
+   assert(test4->base->size == (int) (test1->base->size * RESIZEFACT));
    count = 0;
    for (i = 0; i < test4->base->size; i++){
       if (test4->base->ary[i] != NULL){
@@ -566,18 +596,15 @@ void _test(){
    assert(count == test1->base->count);
    assoc_free(test4);
 
-   assert(_rehash(NULL) == false);
-
-
    /*test again with strings*/
    test4 = assoc_init(0);
-   assert(_rehashTables(NULL, test4) == false);
-   assert(_rehashTables(test3, NULL) == false);
-   assert(_rehashTables(NULL, NULL) == false);
-   assert(_rehashTables(test3, test4) == true);
+   assert(_rehashBothTables(NULL, test4) == false);
+   assert(_rehashBothTables(test3, NULL) == false);
+   assert(_rehashBothTables(NULL, NULL) == false);
+   assert(_rehashBothTables(test3, test4) == true);
    assert(test4->base->count == test3->base->count);
    assert(assoc_count(test4) == assoc_count(test3));
-   assert(test4->base->size == test3->base->size * RESIZEFACT );
+   assert(test4->base->size == (int) (test3->base->size * RESIZEFACT));
    count = 0;
    for (i = 0; i < test4->base->size; i++){
       if (test4->base->ary[i] != NULL){
@@ -586,13 +613,14 @@ void _test(){
    }
    assert(count == test4->base->count);
    assoc_free(test4);
+
+   /*rehash testing*/
    test4 = NULL;
    assert(_rehash(&test4) == false);
    assert(_rehash(&test1) == true);
    assert(_rehash(&test2) == true);
    assert(_rehash(&test3) == true);
-   printf("this is the current size: %d\n", test1->base->size);
-   assert(test1->base->size == INITSIZE * RESIZEFACT);
+   assert(test1->base->size == (int) (INITSIZE * RESIZEFACT));
    assert(test1->base->count == 3);
    assert(test1->useStrings == false);
    count = 0;

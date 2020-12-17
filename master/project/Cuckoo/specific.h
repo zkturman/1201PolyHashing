@@ -1,8 +1,5 @@
 #include "../../../ADTs/General/bool.h"
 
-#define INITSIZE 16
-#define STRINGTYPE 0
-
 struct entry{
    void *key;
    void *data;

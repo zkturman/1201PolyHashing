@@ -1,23 +1,50 @@
 #include "specific.h"
 #include "../assoc.h"
 
-
+#define INITSIZE 17
+#define STRINGTYPE 0
 #define DJB2HASHINIT 5381
 #define DJB2HASHFACT 33
 #define ZKTHASHINIT  331
 #define REHASHMARK 0.6
 #define RESIZEFACT 2
 
+/*Creates a key/data pair structure*/
 entry *_createEntry(void *key, void *data);
+
+/*Hash function used for hash probing. It that loops through the bytes of a key
+value. The function is inspired by DJB2, but attempts a unique spin.*/
 unsigned long _zktHash(assoc *a, void *key);
+
+/*DJB2 hash function that loops through byts of a key value. The function is
+adapted from the one found here: http://www.cse.yorku.ca/~oz/hash.html*/
 unsigned long _djb2Hash(assoc *a, void *key);
+
+/*Finds the next hash index when a collision is encountered*/
 unsigned long _findNextProbe(assoc *a, unsigned long hash, unsigned long probe);
+
+/*Creates a new assoc structure, resizes its data table. It rehashes the
+existing data into the */
 bool _rehash(assoc **a);
+
+/*Used to resize and rehash data from one assoc's table to another's*/
 bool _rehashTable(assoc *old, assoc *new);
+
+/*Determines if an array's capacity is greater than 60% of its size.*/
 bool _shouldRehash(assoc *a);
+
+/*Finds the next prime number in sequence starting from n*/
 int _nextPrime(const int n);
+
+/*Returns true n is prime*/
 bool _isPrime(const int n);
+
+/*Returns true if n is odd*/
 bool _isOdd(const int n);
+
+/*Returns true if data within x and y is the same. The comparison is treated
+differently for strings and non-strings. For non-strings, the keysize stored in
+assoc is used.*/
 bool _keysMatch(assoc *a, void *x, void *y);
 
 /*
@@ -178,7 +205,6 @@ unsigned long _zktHash(assoc *a, void *key){
    return hash % (a->tableSize - 1) + 1;
 }
 
-/*adapted djb2 hash function from http://www.cse.yorku.ca/~oz/hash.html*/
 unsigned long _djb2Hash(assoc *a, void *key){
    unsigned long hash = DJB2HASHINIT;
    unsigned char c;
