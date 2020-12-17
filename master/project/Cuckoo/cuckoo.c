@@ -12,68 +12,73 @@
 #define LOGBASE 2
 #define EVENMOD 2
 
-/**/
+/*Creates table structures for an array of key/data pairs. Contains the count
+of values and total size.*/
 table *_createTable();
 
-/**/
-table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo);
-
-/**/
+/*Creates a structure to contain a key/data pair*/
 entry *_createEntry(void *key, void *data);
 
-/*Generates an SDBM hash from http://www.cse.yorku.ca/~oz/hash.html. This is
-the hash used for the cuckoo table.*/
-unsigned long _sdbmHash(assoc *a, void *key);
+/*Responsible for adding a new entry to assoc a. Returns false if it could not
+find a place for the entry within log base 2 of the table sizes.*/
+bool _doCuckoo(assoc **a, entry **e);
+
+/*Determines whether the base or cuckoo table should be updated*/
+table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo);
 
 /*Generates a DJB2 hash based on code found:
  http://www.cse.yorku.ca/~oz/hash.html. This hash is used for the base table.*/
 unsigned long _djb2Hash(assoc *a, void *key);
 
-/**/
-unsigned long _findNextProbe(assoc *a, unsigned long hash, unsigned long probe);
+/*Generates an SDBM hash from http://www.cse.yorku.ca/~oz/hash.html. This is
+the hash used for the cuckoo table.*/
+unsigned long _sdbmHash(assoc *a, void *key);
 
-/**/
-bool _rehash(assoc **a);
-
-/**/
-bool _rehashBothTables(assoc *old, assoc **new);
-
-/**/
-bool _rehashSingleTable(assoc **newA, table *oldT);
-
-/**/
-bool _shouldRehash(table *t);
-
-
-int _nextPrime(const int n);
-bool _isPrime(const int n);
-
-/**/
-bool _isOdd(const int n);
-
-/**/
-bool _keysMatch(assoc *a, void *x, void *y);
-
-/**/
-bool _doCuckoo(assoc **a, entry **e);
-
-/**/
+/*Returns true if an entry could be added to a hash table. Updates the count of
+ values in the table.*/
 bool _addEntry(table *t, int index, entry *e);
 
-/**/
+/*Returns true if an entry could be updated. Frees e after updating.*/
 bool _updateEntry(table *t, int index, entry *e);
 
-/**/
+/*Returns true if the memory of a give key matches another. If assoc is set
+to use strings, this will be based on strlen. If not, it will be based on the
+the assoc's specified key size.*/
+bool _keysMatch(assoc *a, void *x, void *y);
+
+/*Swaps two entries*/
 void _swapEntry(entry **a, entry **b);
 
-/**/
+/*Returns true if a number is odd*/
+bool _isOdd(const int n);
+
+/*Returns true if the number of values in a table exceed the rehash capacity.*/
+bool _shouldRehash(table *t);
+
+/*Returns true if the fuction could resizes and rehashes the data within an
+assoc a. This creates a new assoc and copies over the data.*/
+bool _rehash(assoc **a);
+
+/*Returns true both the base and cuckoo table could be rehashed successfully*/
+bool _rehashBothTables(assoc *oldA, assoc **newA);
+
+/*Updates the size of a new table based on fact and the size of an old table*/
+void _resizeTable(table *oldT, table *newT, int fact);
+
+/*Returns true if a table could be rehashed successfully. Only one table, the
+base OR the cuckoo is rehashed.*/
+bool _rehashSingleTable(assoc **newA, table *oldT);
+
+/*Returns true if a value could be inserted into an assoc a. This function is
+used only for rehashing. If we couldn't add the key, we try resizing and
+rehashing again.*/
 bool _rehashInsert(assoc** a, void* key, void* data);
 
-/**/
-void _resizeTable(table *old, table *new, int fact);
-
-/**/
+/*Returns the log base two of n approximately. May not work perfectly for odd
+numbers.*/
 int _log2(int n);
+
+void _test();
 
 /*
    Initialise the Associative array
@@ -165,69 +170,6 @@ void assoc_free(assoc* a){
    free(a);
 }
 
-bool _keysMatch(assoc *a, void *x, void *y){
-   if (a == NULL || x == NULL || y == NULL){
-      return false;
-   }
-   if (a->useStrings == true){
-      if (strcmp((char *)x, (char *)y) == 0){
-         return true;
-      }
-   }
-   else{
-      if (memcmp(x, y, a->keySize) == 0){
-         return true;
-      }
-   }
-   return false;
-}
-
-entry *_createEntry(void *key, void *data){
-   entry *e;
-   e = ncalloc(1, sizeof(entry));
-   e->key = key;
-   e->data = data;
-   return e;
-}
-
-/*sdbm from http://www.cse.yorku.ca/~oz/hash.html*/
-unsigned long _sdbmHash(assoc *a, void *key){
-   unsigned long hash = ZKTHASHINIT;
-   unsigned char c;
-   int length, count = 0;
-   if (a->useStrings == true){
-      length = strlen((char *)key);
-   }
-   else{
-      length = a->keySize;
-   }
-   while (count < length){
-      c = *((unsigned char *)key + count);
-      hash = c + (hash << 6) + (hash << 16) - hash;
-      count++;
-   }
-   return hash % a->cuckoo->size;
-}
-
-/*adapted djb2 hash function from http://www.cse.yorku.ca/~oz/hash.html*/
-unsigned long _djb2Hash(assoc *a, void *key){
-   unsigned long hash = DJB2HASHINIT;
-   unsigned char c;
-   int length, count = 0;
-   if (a->useStrings == true){
-      length = strlen((char *)key);
-   }
-   else{
-      length = a->keySize;
-   }
-   while (count < length){
-      c = *((unsigned char *)key + count);
-      hash = (hash * DJB2HASHFACT) + c;
-      count++;
-   }
-   return hash % a->base->size;
-}
-
 table *_createTable(){
    table *t;
    t = ncalloc(1, sizeof(table));
@@ -236,89 +178,12 @@ table *_createTable(){
    return t;
 }
 
-bool _rehash(assoc **a){
-   assoc *newA;
-   if (a == NULL || *a == NULL){
-      return false;
-   }
-   newA = assoc_init((*a)->keySize);
-   newA->useStrings = (*a)->useStrings;
-   _rehashBothTables(*a, &newA);
-   assoc_free(*a);
-   *a = newA;
-   return true;
-}
-
-bool _rehashBothTables(assoc *old, assoc **new){
-   int fact = 1;
-   bool stuck = false;
-   if (new == NULL || old == NULL){
-      return false;
-   }
-   do{
-      fact = (int)(fact * RESIZEFACT);
-      _resizeTable(old->base, (*new)->base, fact);
-      _resizeTable(old->cuckoo, (*new)->cuckoo, fact);
-      if (_rehashSingleTable(new, old->base) == true){
-         stuck = true;
-      }
-      else if (_rehashSingleTable(new, old->cuckoo) == true){
-         stuck = true;
-      }
-      else{
-         stuck = false;
-      }
-   } while (stuck == true);
-   return true;
-}
-
-bool _rehashSingleTable(assoc **newA, table *oldT){
-   int i;
-   bool stuck = false;
-   for (i = 0; i < oldT->size; i++){
-      if (oldT->ary[i] != NULL){
-         stuck = !(_rehashInsert(newA, oldT->ary[i]->key,
-            oldT->ary[i]->data));
-      }
-   }
-   return stuck;
-}
-
-bool _rehashInsert(assoc** a, void* key, void* data){
+entry *_createEntry(void *key, void *data){
    entry *e;
-   bool found;
-   e = _createEntry(key, data);
-   found = _doCuckoo(a, &e);
-   if (found == false){
-      free(e);
-   }
-   return found;
-}
-
-void _resizeTable(table *old, table *new, int fact){
-   int i;
-   /*if we need to resize multiple times, we need to clear the array*/
-   for (i = 0; i < new->size; i++){
-      if (new->ary[i] != NULL){
-         free(new->ary[i]);
-      }
-   }
-   new->count = 0;
-   new->size = old->size * fact;
-   free(new->ary);
-   new->ary = ncalloc(new->size, sizeof(entry *));
-}
-
-bool _shouldRehash(table *t){
-   int capacity;
-   if (t == NULL){
-      return false;
-   }
-   capacity = (int)(t->size * REHASHMARK);
-   if (t->count > capacity){
-      return true;
-   }
-   return false;
+   e = ncalloc(1, sizeof(entry));
+   e->key = key;
+   e->data = data;
+   return e;
 }
 
 bool _doCuckoo(assoc **a, entry **e){
@@ -345,14 +210,51 @@ bool _doCuckoo(assoc **a, entry **e){
    return found;
 }
 
-int _log2(int n){
-   int count = 0, val;
-   val = n;
-   while (val > 0){
-      val /= LOGBASE;
-      count ++;
+table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo){
+   if (!cuckoo){
+      *hash = _djb2Hash(a, key);
+      return a->base;
    }
-   return count;
+   else{
+      *hash = _sdbmHash(a, key);
+      return a->cuckoo;
+   }
+}
+
+unsigned long _djb2Hash(assoc *a, void *key){
+   unsigned long hash = DJB2HASHINIT;
+   unsigned char c;
+   int length, count = 0;
+   if (a->useStrings == true){
+      length = strlen((char *)key);
+   }
+   else{
+      length = a->keySize;
+   }
+   while (count < length){
+      c = *((unsigned char *)key + count);
+      hash = (hash * DJB2HASHFACT) + c;
+      count++;
+   }
+   return hash % a->base->size;
+}
+
+unsigned long _sdbmHash(assoc *a, void *key){
+   unsigned long hash = ZKTHASHINIT;
+   unsigned char c;
+   int length, count = 0;
+   if (a->useStrings == true){
+      length = strlen((char *)key);
+   }
+   else{
+      length = a->keySize;
+   }
+   while (count < length){
+      c = *((unsigned char *)key + count);
+      hash = c + (hash << 6) + (hash << 16) - hash;
+      count++;
+   }
+   return hash % a->cuckoo->size;
 }
 
 bool _addEntry(table *t, int index, entry *e){
@@ -379,6 +281,23 @@ bool _updateEntry(table *t, int index, entry *e){
    return true;
 }
 
+bool _keysMatch(assoc *a, void *x, void *y){
+   if (a == NULL || x == NULL || y == NULL){
+      return false;
+   }
+   if (a->useStrings == true){
+      if (strcmp((char *)x, (char *)y) == 0){
+         return true;
+      }
+   }
+   else{
+      if (memcmp(x, y, a->keySize) == 0){
+         return true;
+      }
+   }
+   return false;
+}
+
 void _swapEntry(entry **a, entry **b){
    entry *tmp;
    tmp = *a;
@@ -386,19 +305,103 @@ void _swapEntry(entry **a, entry **b){
    *b = tmp;
 }
 
-table *_specifyTable(assoc *a, void *key, unsigned long *hash, bool cuckoo){
-   if (!cuckoo){
-      *hash = _djb2Hash(a, key);
-      return a->base;
-   }
-   else{
-      *hash = _sdbmHash(a, key);
-      return a->cuckoo;
-   }
-}
-
 bool _isOdd(const int n){
    return n % EVENMOD;
+}
+
+bool _shouldRehash(table *t){
+   int capacity;
+   if (t == NULL){
+      return false;
+   }
+   capacity = (int)(t->size * REHASHMARK);
+   if (t->count > capacity){
+      return true;
+   }
+   return false;
+}
+
+bool _rehash(assoc **a){
+   assoc *newA;
+   if (a == NULL || *a == NULL){
+      return false;
+   }
+   newA = assoc_init((*a)->keySize);
+   newA->useStrings = (*a)->useStrings;
+   _rehashBothTables(*a, &newA);
+   assoc_free(*a);
+   *a = newA;
+   return true;
+}
+
+bool _rehashBothTables(assoc *oldA, assoc **newA){
+   int fact = 1;
+   bool stuck = false;
+   if (newA == NULL || oldA == NULL){
+      return false;
+   }
+   do{
+      fact = (int)(fact * RESIZEFACT);
+      _resizeTable(oldA->base, (*newA)->base, fact);
+      _resizeTable(oldA->cuckoo, (*newA)->cuckoo, fact);
+      if (_rehashSingleTable(newA, oldA->base) == true){
+         stuck = true;
+      }
+      else if (_rehashSingleTable(newA, oldA->cuckoo) == true){
+         stuck = true;
+      }
+      else{
+         stuck = false;
+      }
+   } while (stuck == true);
+   return true;
+}
+
+void _resizeTable(table *oldT, table *newT, int fact){
+   int i;
+   /*if we need to resize multiple times, we need to clear the array*/
+   for (i = 0; i < newT->size; i++){
+      if (newT->ary[i] != NULL){
+         free(newT->ary[i]);
+      }
+   }
+   newT->count = 0;
+   newT->size = oldT->size * fact;
+   free(newT->ary);
+   newT->ary = ncalloc(newT->size, sizeof(entry *));
+}
+
+bool _rehashSingleTable(assoc **newA, table *oldT){
+   int i;
+   bool stuck = false;
+   for (i = 0; i < oldT->size; i++){
+      if (oldT->ary[i] != NULL){
+         stuck = !(_rehashInsert(newA, oldT->ary[i]->key,
+            oldT->ary[i]->data));
+      }
+   }
+   return stuck;
+}
+
+bool _rehashInsert(assoc** a, void* key, void* data){
+   entry *e;
+   bool found;
+   e = _createEntry(key, data);
+   found = _doCuckoo(a, &e);
+   if (found == false){
+      free(e);
+   }
+   return found;
+}
+
+int _log2(int n){
+   int count = 0, val;
+   val = n;
+   while (val > 0){
+      val /= LOGBASE;
+      count ++;
+   }
+   return count;
 }
 
 void _test(){

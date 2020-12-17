@@ -14,5 +14,3 @@ struct assoc{
    int useStrings;
 };
 typedef struct assoc assoc;
-
-void _test();

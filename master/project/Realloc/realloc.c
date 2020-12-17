@@ -15,17 +15,25 @@
 /*Creates a key/data pair structure*/
 entry *_createEntry(void *key, void *data);
 
+/*DJB2 hash function that loops through byts of a key value. The function is
+adapted from the one found here: http://www.cse.yorku.ca/~oz/hash.html*/
+unsigned long _djb2Hash(assoc *a, void *key);
+
 /*Hash function used for probing. It loops through the bytes of a key value.
 The function is inspired by DJB2, but a bit of a spin.
 http://www.cse.yorku.ca/~oz/hash.html*/
 unsigned long _zktHash(assoc *a, void *key);
 
-/*DJB2 hash function that loops through byts of a key value. The function is
-adapted from the one found here: http://www.cse.yorku.ca/~oz/hash.html*/
-unsigned long _djb2Hash(assoc *a, void *key);
+/*Returns true if data within x and y is the same. The comparison is treated
+differently for strings and non-strings. For non-strings, the keysize stored in
+assoc is used.*/
+bool _keysMatch(assoc *a, void *x, void *y);
 
 /*Finds the next hash index when a collision is encountered*/
 unsigned long _findNextProbe(assoc *a, unsigned long hash, unsigned long probe);
+
+/*Determines if an array's capacity is greater than 60% of its size.*/
+bool _shouldRehash(assoc *a);
 
 /*Creates a new assoc structure and resizes its data table. It rehashes the
 existing data after resizing.*/
@@ -33,9 +41,6 @@ bool _rehash(assoc **a);
 
 /*Used to resize and rehash data from one assoc's table to another's*/
 bool _rehashTable(assoc *old, assoc *new);
-
-/*Determines if an array's capacity is greater than 60% of its size.*/
-bool _shouldRehash(assoc *a);
 
 /*Finds the next prime number in sequence starting from n*/
 int _nextPrime(const int n);
@@ -46,10 +51,7 @@ bool _isPrime(const int n);
 /*Returns true if n is odd*/
 bool _isOdd(const int n);
 
-/*Returns true if data within x and y is the same. The comparison is treated
-differently for strings and non-strings. For non-strings, the keysize stored in
-assoc is used.*/
-bool _keysMatch(assoc *a, void *x, void *y);
+void _test();
 
 /*
    Initialise the Associative array
@@ -157,23 +159,6 @@ void assoc_free(assoc* a){
    free(a);
 }
 
-bool _keysMatch(assoc *a, void *x, void *y){
-   if (a == NULL || x == NULL || y == NULL){
-      return false;
-   }
-   if (a->useStrings == true){
-      if (strcmp((char *)x, (char *)y) == 0){
-         return true;
-      }
-   }
-   else{
-      if (memcmp(x, y, a->keySize) == 0){
-         return true;
-      }
-   }
-   return false;
-}
-
 entry *_createEntry(void *key, void *data){
    entry *e;
    e = ncalloc(1, sizeof(entry));
@@ -182,7 +167,24 @@ entry *_createEntry(void *key, void *data){
    return e;
 }
 
-/*custom hashing equation, though partially inspired by djb2*/
+unsigned long _djb2Hash(assoc *a, void *key){
+   unsigned long hash = DJB2HASHINIT;
+   unsigned char c;
+   int length, count = 0;
+   if (a->useStrings == true){
+      length = strlen((char *)key);
+   }
+   else{
+      length = a->keySize;
+   }
+   while (count < length){
+      c = *((unsigned char *)key + count);
+      hash = (hash * DJB2HASHFACT) + c;
+      count++;
+   }
+   return hash % a->tableSize;
+}
+
 unsigned long _zktHash(assoc *a, void *key){
    int length, position, count = 0;
    unsigned long hash = ZKTHASHINIT;
@@ -202,22 +204,33 @@ unsigned long _zktHash(assoc *a, void *key){
    return hash % (a->tableSize - 1) + 1;
 }
 
-unsigned long _djb2Hash(assoc *a, void *key){
-   unsigned long hash = DJB2HASHINIT;
-   unsigned char c;
-   int length, count = 0;
+bool _keysMatch(assoc *a, void *x, void *y){
+   if (a == NULL || x == NULL || y == NULL){
+      return false;
+   }
    if (a->useStrings == true){
-      length = strlen((char *)key);
+      if (strcmp((char *)x, (char *)y) == 0){
+         return true;
+      }
    }
    else{
-      length = a->keySize;
+      if (memcmp(x, y, a->keySize) == 0){
+         return true;
+      }
    }
-   while (count < length){
-      c = *((unsigned char *)key + count);
-      hash = (hash * DJB2HASHFACT) + c;
-      count++;
+   return false;
+}
+
+bool _shouldRehash(assoc *a){
+   int capacity;
+   if (a == NULL){
+      return false;
    }
-   return hash % a->tableSize;
+   capacity = (int)(a->tableSize * REHASHMARK);
+   if (a->count > capacity){
+      return true;
+   }
+   return false;
 }
 
 bool _rehash(assoc **a){
@@ -249,18 +262,6 @@ bool _rehashTable(assoc *old, assoc *new){
       }
    }
    return true;
-}
-
-bool _shouldRehash(assoc *a){
-   int capacity;
-   if (a == NULL){
-      return false;
-   }
-   capacity = (int)(a->tableSize * REHASHMARK);
-   if (a->count > capacity){
-      return true;
-   }
-   return false;
 }
 
 int _nextPrime(const int n){
