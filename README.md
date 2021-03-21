@@ -1,5 +1,5 @@
 # 1201PolyHashing
 Polymorphic Hashing
 
-Assignment for COMSM1201
-Final grade: 78%
+Assignment for COMSM1201  
+Final grade: Distinction (78%)
